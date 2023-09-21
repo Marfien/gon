@@ -138,18 +138,13 @@ public class GonReader implements AutoCloseable {
         if ("null".equals(valueString)) return GonValue.NULL;
 
         // Classic number declarations
-        if (isNumber(valueString)) {
-            // If it does not contain a period it is not a decimal number.
-            return valueString.indexOf('.') == -1
-                    ? new GonInt(Long.parseLong(valueString))
-                    : new GonFloat(Double.parseDouble(valueString));
+        if (isFloatingNumber(valueString)) {
+            return new GonFloat(Double.parseDouble(valueString));
         }
 
-        // Number declaration with custom radix
-        if (valueString.startsWith("0x")) return new GonInt(parseHex(valueString));
-        if (valueString.startsWith("0b")) return new GonInt(parseBinary(valueString));
-
-        throw new GonUnknownValueException(valueString);
+        OptionalLong number = decodeLong(valueString);
+        if (number.isPresent()) return new GonInt(number.getAsLong());
+        else throw new GonUnknownValueException(valueString);
     }
 
     public String nextString() throws IOException {
@@ -257,43 +252,84 @@ public class GonReader implements AutoCloseable {
         this.reader = null;
     }
 
-    private static boolean isNumber(String s) {
-        boolean foundPeriod = false;
+    private static boolean isFloatingNumber(String s) {
+        if (s.isEmpty())
+            return false;
+
+        char firstChar = s.charAt(0);
+        int startIndex = firstChar == '-' || firstChar == '+' ? 1 : 0;
         char[] chars = s.toCharArray();
-        // Skipping the '-' if it is present
-        for (int i = chars[0] == '-' ? 1 : 0; i < chars.length; i++) {
-            char c = chars[i];
-            // One period is allowed
-            if (c == '.') {
-                // If there is a second is cannot be cast to a number.
+        boolean foundPeriod = false;
+
+        for (int i = startIndex; i < chars.length; i++) {
+            char current = chars[i];
+
+            if (current == '.') {
+                // Two periods
+                // A floating point number can only have one
                 if (foundPeriod) return false;
 
                 foundPeriod = true;
+                continue;
             }
 
-            if (c < '0' || c > '9')
+            if (current < '0' || current > '9') {
                 return false;
+            }
         }
 
-        return true;
+        // Needs to find exactly one period to be a FLOATING point number
+        return foundPeriod;
     }
 
-    private static long parseHex(String s) throws GonParseException {
-        // HEX: radix 16
-        try {
-            return Long.parseLong(s, 16);
-        } catch (NumberFormatException e) {
-            throw new GonParseException("Cannot parse HEX number. Invalid format: " + s, e);
-        }
-    }
+    private static OptionalLong decodeLong(String s) throws IOException {
+        int radix = 10;
+        int index = 0;
+        boolean negative = false;
+        long result;
 
-    private static long parseBinary(String s) throws GonParseException {
-        // Binary: radix 8
-        try {
-            return Long.parseLong(s, 8);
-        } catch (NumberFormatException e) {
-            throw new GonParseException("Cannot parse number in binary format. Invalid format: " + s, e);
+        if (s.isBlank())
+            throw new GonParseException("Received empty string to decode as long");
+        char firstChar = s.charAt(0);
+
+        // Check for sign
+        if (firstChar == '-') {
+            negative = true;
+            index++;
+        } else if (firstChar == '+') {
+            index++;
         }
+
+        // Handle different radix'
+        if (s.startsWith("0x", index) || s.startsWith("0X", index)) {
+            radix = 16;
+            index += 2;
+        } else if (s.startsWith("#", index)) {
+            radix = 16;
+            index++;
+        } else if (s.startsWith("0b", index) || s.startsWith("0B", index)) {
+            radix = 2;
+            index += 2;
+        } else if (s.startsWith("0", index)) {
+            radix = 8;
+            index++;
+        }
+
+        if (s.startsWith("+", index) || s.startsWith("-"))
+            throw new GonParseException("Sign in wrong position. Needs to be the first character: '%s'".formatted(s));
+
+        try {
+            result = Long.parseLong(s, index, s.length(), radix);
+            result *= negative ? -1 : 1;
+        } catch (NumberFormatException e) {
+            // If the number is Long.MIN_VALUE, it will throw an error because it is out of bounds.
+            String parsable = negative ? '-' + s.substring(index) : s.substring(index);
+            result = Long.parseLong(parsable, radix);
+        } catch (Throwable t) {
+            return OptionalLong.empty();
+        }
+
+        return OptionalLong.of(result);
     }
 
 }
